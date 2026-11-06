@@ -8,10 +8,13 @@ let nextId = 0;
 function render({model, el}) {
   const scenario = model.get('scenario');
   const steps = scenario.steps;
+  const processMode = scenario.kind === 'process';
+  let selectedDocument = processMode ? steps[0].document : null, followCode = true, displayOwner = 'os';
+  const openDetails = new Set();
   const uid = `bv-${++nextId}`;
   let index = Math.max(0, Math.min(steps.length - 1, model.get('selected_index') || 0));
   let codeMode = 'asm', playing = false, frozen = false, animating = false;
-  let epoch = 0, frameId = 0, timer = 0, disposed = false, resolveMotion = null;
+  let epoch = 0, frameId = 0, timer = 0, syncTimer = 0, disposed = false, resolveMotion = null;
   const reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
   const root = document.createElement('section');
   root.className = 'bv-workbench';
@@ -52,10 +55,114 @@ function render({model, el}) {
     <footer class="bv-bottom"><details><summary>Was zeigt dieses Modell?</summary><p>${esc(scenario.notes)} Die Animation zeigt logische Wertübertragungen, keine tatsächlichen Takte oder Mikroarchitektur.</p></details><span class="bv-flow-legend"><i class="bv-dot"></i>Wert / Zeiger &nbsp; <i class="bv-dot bv-blue"></i>Kontrollfluss</span></footer>`;
   el.appendChild(root);
   const $ = selector => root.querySelector(selector);
-  const stage = $('.bv-stage'), wires = $('.bv-wires'), range = $('input[type=range]'), speed = $('select');
+  const stage = $('.bv-stage'), wires = $('.bv-wires'), range = $('input[type=range]'), speed = $('.bv-speed select');
   const button = action => $(`[data-action="${action}"]`);
   const valueText = (name, value) => name === 'a0' ? String(value) : hex(value);
   const meanings = {sp:'Stackpointer',ra:'Rücksprung',s0:'Framepointer',a0:'Argument / Ergebnis'};
+
+  if (processMode) installProcessUI();
+
+  // The process lesson uses the same player, transport animation and controls.
+  // Its additional panes are data-driven views of contexts and logical stacks.
+  function installProcessUI() {
+    root.classList.add('bv-process-workbench');
+    $('.bv-model-tag').textContent='Exercise 2 / CP1';
+    $('.bv-code-panel').innerHTML=`<div class="bv-panel-head"><h2><span class="bv-panel-index">01</span> Lab-Code</h2><label class="bv-follow"><input type="checkbox" checked aria-label="Codeposition automatisch folgen"> Folgen</label></div><div class="bv-filebar"><select aria-label="Quelldatei">${scenario.documents.map(doc=>`<option value="${esc(doc.id)}">${esc(doc.title)}</option>`).join('')}</select><span class="bv-file-kind"></span></div><div class="bv-code-body bv-lab-code"></div><div class="bv-code-provenance"></div>`;
+    $('.bv-cpu-panel').innerHTML=`<div class="bv-panel-head"><h2><span class="bv-panel-index">02</span> CPU & Kontextwechsel</h2><span class="bv-owner"></span></div><div class="bv-chip"><div class="bv-chip-title">AKTIVE CPU-REGISTER</div><div class="bv-pc" data-endpoint="cpu:pc"><span>Codeposition</span><code data-value></code></div><div class="bv-registers"></div><div class="bv-saved-bank" data-endpoint="cpu:bank"></div></div><div class="bv-context-heading">RAM · gespeicherte Registerkopien</div><div class="bv-context-dock"></div><div class="bv-cpu-note">Ein Kontext ist eine gespeicherte Kopie. Der Switch kopiert Registerwerte, kein Stackarray.</div>`;
+    $('.bv-stack-panel').innerHTML=`<div class="bv-panel-head"><h2><span class="bv-panel-index">03</span> Stacks & lokale Daten</h2><span class="bv-state-badge"></span></div><div class="bv-process-memory"><div class="bv-process-object"></div><div class="bv-process-stacks"></div><div class="bv-storage-note">p lebt in main; p.stack[4096] ist der reservierte Prozessstack.</div><div class="bv-array-section"></div><div class="bv-tmp"></div><div class="bv-terminal"><div class="bv-terminal-label">UART · bisherige Ausgabe</div><pre></pre></div></div>`;
+    const chapters=document.createElement('nav');chapters.className='bv-chapters';chapters.setAttribute('aria-label','Abschnitte im Lab-Ablauf');
+    chapters.innerHTML=scenario.chapters.map(([title,i])=>`<button data-step="${i}">${esc(title)}</button>`).join('');
+    $('.bv-toolbar').after(chapters);
+    const follow=$('.bv-follow input'),select=$('.bv-filebar select');
+    select.addEventListener('change',()=>{followCode=false;follow.checked=false;selectedDocument=select.value;drawProcessCode(steps[index]);drawWires();});
+    follow.addEventListener('change',()=>{followCode=follow.checked;drawProcessCode(steps[index]);drawWires();});
+    $('.bv-flow-legend').textContent='Stacks schematisch · Adressen sind Modellwerte';
+  }
+
+  function registerDetails(registers, fields=null) {
+    const values=Object.fromEntries(registers);
+    return Array.from({length:12},(_,i)=>`<span data-sreg="s${i}"><small>s${i}</small><code>${fields&&!fields.includes(`s${i}`)?'—':hex(values[`s${i}`])}</code></span>`).join('');
+  }
+  function drawProcessCode(step) {
+    if(followCode)selectedDocument=step.document;
+    const doc=scenario.documents.find(doc=>doc.id===selectedDocument)||scenario.documents[0];
+    $('.bv-filebar select').value=doc.id;
+    $('.bv-file-kind').textContent=doc.id==='process.c'?'CP1-Referenz':doc.id==='context.S'||doc.id==='context.h'?'Erklärende Fassung':'Anwendung / API';
+    const focused=doc.id===step.document?new Set(step.focus_lines?.length?step.focus_lines:[step.line]):new Set();
+    $('.bv-code-body').innerHTML=doc.lines.map((line,i)=>`<div class="bv-code-row ${focused.has(i+1)?'bv-executed':''}" ${doc.id===step.document&&step.line===i+1?'data-endpoint="code:active" aria-current="step"':''}><span class="bv-code-address">${i+1}</span><code>${esc(line)||' '}</code></div>`).join('');
+    $('.bv-code-provenance').textContent=doc.provenance;
+    if(followCode){const body=$('.bv-code-body'),node=body.querySelector('[aria-current]');if(node)body.scrollTop=node.offsetTop-body.offsetTop-body.clientHeight/2+node.clientHeight/2;}
+  }
+  function drawProcessContexts(step) {
+    $('.bv-context-dock').innerHTML=step.contexts.map(context=>{
+      const values=Object.fromEntries(context.registers),ready=new Set(context.ready_fields),key=`context-${context.id}`;
+      return `<section class="bv-context-card"><header><strong>${esc(context.title)}</strong><small>${ready.size}/14 gesichert</small></header>${['ra','sp'].map(name=>`<div class="bv-context-field" data-endpoint="context:${context.id}:${name}"><span>${name}</span><code data-value>${ready.has(name)?hex(values[name]):'—'}</code></div>`).join('')}<div class="bv-context-ra-label">${ready.has('ra')?esc(context.ra_label):'Noch kein Fortsetzungsziel'}</div><details class="bv-bank-details" data-detail="${key}" data-endpoint="context:${context.id}:bank" ${openDetails.has(key)?'open':''}><summary><span data-value>${Array.from(ready).filter(n=>n.startsWith('s')&&n!=='sp').length}/12 s-Register</span></summary><div class="bv-register-details">${registerDetails(context.registers,context.ready_fields)}</div></details></section>`;
+    }).join('');
+  }
+  function drawProcessStacks(step) {
+    $('.bv-process-stacks').innerHTML=step.regions.map(region=>`<section class="bv-stack-region ${region.id===step.active_owner?'bv-live-stack':'bv-resting-stack'}"><header><strong>${esc(region.title)}</strong><small>${region.id===step.active_owner?'CPU aktiv':region.id==='process'&&step.process_state==='FINISHED'?'beendet · nicht fortsetzen':region.allocated?'erhalten':'nicht vorbereitet'}</small></header><div class="bv-call-frames">${region.frames.length?region.frames.map((name,i)=>`<div class="bv-call-frame"><span>${i?'↳':'●'}</span><code>${esc(name)}</code></div>`).join(''):`<div class="bv-no-frame">${region.allocated?'Vorbereitet; noch keine aktive Aufrufkette':'Noch nicht vorbereitet'}</div>`}</div><div class="bv-region-sp" data-endpoint="stack:${region.id}"><small>sp ${region.id===step.active_owner?'← CPU':'gespeichert / ruhend'}</small><code>${hex(region.sp)}</code></div></section>`).join('');
+    $('.bv-array-section').innerHTML=`<div class="bv-array-heading"><strong>value[]</strong><span>lokales Array von worker</span></div><div class="bv-array" data-endpoint="array:base">${Array.from({length:5},(_,i)=>`<div class="bv-byte ${i===4?'bv-null-byte':''}" data-endpoint="array:${i}"><small>[${i}]</small><strong data-value>${step.value.length?esc(step.value[i]==='\0'?'\\0':step.value[i]):'—'}</strong></div>`).join('')}</div><div class="bv-array-note">${step.process_state==='FINISHED'?'Ausführung beendet; die alten Bytes bleiben sichtbar.':step.value.length?'permute erhält einen Zeiger auf dieses Array, keine Kopie.':'Das Array entsteht erst beim ersten Eintritt in worker.'}</div>`;
+    $('.bv-tmp').innerHTML=`<span>tmp <small>· logischer C-Wert</small></span><strong data-endpoint="local:tmp"><span data-value>${step.tmp===null?'—':esc(step.tmp)}</span></strong>`;
+    $('.bv-process-object').innerHTML=`<span>current_process <strong>${step.current_process?'&p':'0'}</strong></span><span>entry <strong>${step.contexts.find(c=>c.id==='process').ready_fields.length?'worker':'—'}</strong></span><span>exit <strong>${step.exit_status===null?'—':step.exit_status}</strong></span>`;
+    $('.bv-terminal pre').textContent=step.output.length?step.output.join('\n'):'Noch keine Ausgabe';
+  }
+  function drawProcessState() {
+    const step=steps[index],previous=index?steps[index-1]:null;
+    const values=Object.fromEntries(step.registers),old=Object.fromEntries(previous?.registers||[]);
+    displayOwner=step.active_owner;
+    drawProcessCode(step);
+    $('.bv-owner').textContent=step.active_owner==='os'?'OS-Stack aktiv':'Prozessstack aktiv';
+    $('.bv-pc code').textContent=step.location;
+    $('.bv-registers').innerHTML=['sp','ra','s0','s1'].map(name=>`<div class="bv-register ${previous&&old[name]!==values[name]?'bv-changed':''}" data-endpoint="register:${name}"><div class="bv-register-name"><span>${name}</span><small>${name==='sp'?'Stackpointer':name==='ra'?'Fortsetzung':'callee-saved'}</small></div><span class="bv-register-value" data-value>${hex(values[name])}</span>${name==='ra'?`<small class="bv-ra-label">${esc(step.ra_label)}</small>`:''}</div>`).join('');
+    $('.bv-saved-bank').innerHTML=`<details class="bv-bank-details" data-detail="cpu-registers" ${openDetails.has('cpu-registers')?'open':''}><summary><span data-value>s0–s11 · alle 12 anzeigen</span></summary><div class="bv-register-details">${registerDetails(step.registers)}</div></details>`;
+    drawProcessContexts(step);drawProcessStacks(step);
+    $('.bv-state-badge').textContent=step.process_state==='—'?'nicht angelegt':step.process_state;
+    $('.bv-state-badge').dataset.state=step.process_state;
+    $('.bv-caption-step').textContent=`SCHRITT ${String(index+1).padStart(2,'0')} / ${steps.length} · ${step.document}`;
+    $('h3').textContent=step.title;$('.bv-caption-text').textContent=step.explanation;
+    $('.bv-transfer-label').textContent=step.transfers.length?'↗ „Schritt“ animiert diesen Übergang.':'';
+    $('.bv-count').textContent=`${index+1} / ${steps.length}`;range.value=index;
+    let currentChapter=0;scenario.chapters.forEach(([_,i])=>{if(i<=index)currentChapter=i;});
+    root.querySelectorAll('[data-step]').forEach(node=>node.setAttribute('aria-current',Number(node.dataset.step)===currentChapter?'step':'false'));
+    updateButtons();requestAnimationFrame(drawWires);
+  }
+  function drawProcessWires() {
+    const rect=stage.getBoundingClientRect();wires.setAttribute('viewBox',`0 0 ${rect.width} ${rect.height}`);
+    let fixed=wires.querySelector('.bv-fixed');if(!fixed){fixed=svgElement('g',{class:'bv-fixed'});wires.prepend(fixed);}
+    fixed.innerHTML=`<defs><marker id="${uid}-arrow" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto"><path d="M 0 0 L 8 4 L 0 8 z" fill="#098489"/></marker></defs>`;
+    const path=route('register:sp',`stack:${displayOwner}`);
+    if(path)fixed.append(svgElement('path',{d:path,class:'bv-sp-wire','marker-end':`url(#${uid}-arrow)`}));
+  }
+  function setProcessDestination(transfer,prior) {
+    const node=endpoint(transfer.target);if(!node)return;
+    const snapshot=prior&&index?steps[index-1]:steps[index];
+    const values=Object.fromEntries(snapshot.registers);
+    let value=transfer.value;
+    if(transfer.target.startsWith('register:')) {
+      const name=transfer.target.split(':')[1];value=hex(values[name]);
+      if(name==='sp'){displayOwner=snapshot.active_owner;drawProcessStacks(snapshot);$('.bv-owner').textContent=displayOwner==='os'?'OS-Stack aktiv':'Prozessstack aktiv';drawWires();}
+    } else if(transfer.target.startsWith('context:')) {
+      const [,owner,field]=transfer.target.split(':'),context=snapshot.contexts.find(c=>c.id===owner);
+      if(field!=='bank')value=context.ready_fields.includes(field)?hex(Object.fromEntries(context.registers)[field]):'—';
+      else {
+        value=`${context.ready_fields.filter(n=>n.startsWith('s')&&n!=='sp').length}/12 s-Register`;
+        node.querySelector('.bv-register-details').innerHTML=registerDetails(context.registers,context.ready_fields);
+      }
+    } else if(transfer.target==='cpu:bank') {
+      value='s0–s11 · alle 12 anzeigen';
+      node.querySelector('.bv-register-details').innerHTML=registerDetails(snapshot.registers);
+      for(const name of ['s0','s1'])endpoint(`register:${name}`).querySelector('[data-value]').textContent=hex(values[name]);
+    } else if(transfer.target==='local:tmp')value=snapshot.tmp===null?'—':snapshot.tmp;
+    else if(transfer.target.startsWith('array:')) {
+      if(transfer.target==='array:base'){
+        for(let i=0;i<5;i++)endpoint(`array:${i}`).querySelector('[data-value]').textContent=snapshot.value.length?(snapshot.value[i]==='\0'?'\\0':snapshot.value[i]):'—';
+        return;
+      }
+      const character=snapshot.value[Number(transfer.target.split(':')[1])];value=character==='\0'?'\\0':character??'—';
+    } else if(transfer.target==='cpu:pc')value=snapshot.location;
+    const label=node.querySelector('[data-value]');if(label)label.textContent=value;
+    if(!prior){node.classList.add('bv-flash');setTimeout(()=>node.classList.remove('bv-flash'),500);}
+  }
 
   function codeRows(step) {
     const previous = index > 0 ? steps[index - 1] : null;
@@ -73,6 +180,7 @@ function render({model, el}) {
   }
 
   function drawState() {
+    if (processMode) { drawProcessState(); return; }
     const step = steps[index], previous = index ? steps[index-1] : null;
     const registers = Object.fromEntries(step.registers);
     const old = Object.fromEntries(previous?.registers || []);
@@ -131,6 +239,13 @@ function render({model, el}) {
   function route(source, target) {
     // Leave register banks through the gaps between rows, not through other registers.
     const a=point(source),b=point(target);if(!a||!b)return '';
+    if(/^array:\d+$/.test(source)&&/^array:\d+$/.test(target)) {
+      const base=stage.getBoundingClientRect();
+      const from=endpoint(source).getBoundingClientRect(),to=endpoint(target).getBoundingClientRect();
+      const ax=from.left+from.width/2-base.left,ay=from.top-base.top;
+      const bx=to.left+to.width/2-base.left,by=to.top-base.top;
+      return `M ${ax} ${ay} C ${ax} ${ay-40}, ${bx} ${by-40}, ${bx} ${by}`;
+    }
     const base=stage.getBoundingClientRect(),cpu=$('.bv-cpu-panel').getBoundingClientRect();
     const lane=cpu.right-base.left+12;
     let path='',end;
@@ -164,6 +279,7 @@ function render({model, el}) {
   }
   function drawWires() {
     if(disposed) return;
+    if(processMode){drawProcessWires();return;}
     const rect=stage.getBoundingClientRect();
     wires.setAttribute('viewBox',`0 0 ${rect.width} ${rect.height}`);
     let fixed=wires.querySelector('.bv-fixed');
@@ -180,9 +296,19 @@ function render({model, el}) {
     root.querySelectorAll('.bv-active-node').forEach(node=>node.classList.remove('bv-active-node'));
   }
   function stop() {playing=false;cancelMotion();drawState();}
-  function syncIndex() { if(model.get('selected_index')!==index){model.set('selected_index',index);model.save_changes();} }
+  function syncIndex() {
+    // Keep dragging/animation local; publish only the last settled selection.
+    // The complete immutable lesson is already available in this browser.
+    clearTimeout(syncTimer);
+    if(model.get('selected_index')!==index) syncTimer=setTimeout(()=>{
+      syncTimer=0;
+      if(disposed)return;
+      model.set('selected_index',index);model.save_changes();
+    },200);
+  }
 
   function setDestination(transfer, prior=false) {
+    if(processMode){setProcessDestination(transfer,prior);return;}
     const node=endpoint(transfer.target);if(!node)return;
     const previous=steps[index-1];
     let value=transfer.value;
@@ -252,13 +378,15 @@ function render({model, el}) {
     updateButtons();
   }
   const actions={reset:()=>{playing=false;go(0);},back:()=>{playing=false;go(index-1);},next:()=>{playing=false;go(index+1,true);},play:playPause,replay:()=>{playing=false;go(index,true);}};
-  const click=event=>{const target=event.target.closest('[data-action],[data-mode]');if(!target)return;if(target.dataset.action)actions[target.dataset.action]?.();else{codeMode=target.dataset.mode;stop();}};
+  const click=event=>{const target=event.target.closest('[data-action],[data-mode],[data-step]');if(!target)return;if(target.dataset.step!==undefined){playing=false;go(Number(target.dataset.step));return;}if(target.dataset.action)actions[target.dataset.action]?.();else{codeMode=target.dataset.mode;stop();}};
   const scrub=()=>{playing=false;go(Number(range.value));};
-  const external=()=>{const next=model.get('selected_index');if(next!==index){playing=false;go(next);}};
+  const external=()=>{if(syncTimer)return;const next=model.get('selected_index');if(next!==index){playing=false;go(next);}};
+  const trackDetails=event=>{const key=event.target.dataset?.detail;if(key){if(event.target.open)openDetails.add(key);else openDetails.delete(key);}};
+  root.addEventListener('toggle',trackDetails,true);
   root.addEventListener('click',click);range.addEventListener('input',scrub);
   model.on('change:selected_index',external);
   const resize=new ResizeObserver(drawWires);resize.observe(stage);
   drawState();
-  return ()=>{disposed=true;cancelMotion();resize.disconnect();root.removeEventListener('click',click);range.removeEventListener('input',scrub);model.off('change:selected_index',external);root.remove();};
+  return ()=>{disposed=true;clearTimeout(syncTimer);cancelMotion();resize.disconnect();root.removeEventListener('toggle',trackDetails,true);root.removeEventListener('click',click);range.removeEventListener('input',scrub);model.off('change:selected_index',external);root.remove();};
 }
 export default {render};

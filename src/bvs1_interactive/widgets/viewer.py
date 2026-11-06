@@ -4,6 +4,7 @@ from pathlib import Path
 import anywidget
 import traitlets
 from bvs1_interactive.model import Scenario
+from bvs1_interactive.model.process import ProcessScenario
 
 
 class ExecutionViewer(anywidget.AnyWidget):
@@ -12,12 +13,14 @@ class ExecutionViewer(anywidget.AnyWidget):
     scenario = traitlets.Dict().tag(sync=True)
     selected_index = traitlets.Int(0).tag(sync=True)
 
-    def __init__(self, scenario: Scenario, **kwargs):
+    def __init__(self, scenario: Scenario | ProcessScenario, **kwargs):
         payload = asdict(scenario)
         # JSON numbers cannot represent every RV64 register value exactly.
         for step in payload["steps"]:
             step["registers"] = [(name, str(value)) for name, value in step["registers"]]
-            for slot in step["stack"]:
+            for context in step.get("contexts", ()):
+                context["registers"] = [(name, str(value)) for name, value in context["registers"]]
+            for slot in step.get("stack", ()):
                 if slot["value"] is not None:
                     slot["value"] = str(slot["value"])
         super().__init__(scenario=payload, **kwargs)

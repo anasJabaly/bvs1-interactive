@@ -103,3 +103,25 @@ Vorwärtsgehen und „Schritt“ animieren den Übergang aus dem vorherigen Zust
 Pause hält auch die gerade sichtbare Bewegung an. Verminderte Bewegung wird
 über `prefers-reduced-motion` berücksichtigt. RV64-Werte werden ohne Verlust
 durch JavaScripts Zahlenformat an die Oberfläche übertragen.
+
+
+## Lab-Anwendung: permute, Yield und Kontextwechsel
+
+```bash
+uv build --wheel
+uv run marimo edit notebooks/03_prozess_yield_permute.py
+```
+
+Das neue Lab-Notebook verbindet fünf vollständig einsehbare Quelldateien
+mit zwei Stackansichten, der aktiven CPU, den beiden gespeicherten Kontexten,
+dem Zeichenarray und der UART-Ausgabe. Kapitel erlauben Sprünge zu Yield,
+OS-Pause, Resume und Exit. „Folgen“ bindet die Codeansicht an den aktuellen
+Schritt; ausgeschaltet können alle Dateien unabhängig gelesen werden.
+
+Quellen und fachliche Grenzen: [docs/03_lab_quellen.md](docs/03_lab_quellen.md).
+Insbesondere context.S ist eine gekennzeichnete erklärende Umsetzung,
+keine als original verifizierte Kursdatei. Die 54 Schritte sind Lehrzustände,
+keine gemessene RISC-V-Instruktionsspur.
+
+Schnelles Ziehen am Schrittregler wird lokal sofort dargestellt; die Auswahl
+wird nach 200 ms ohne weitere Änderung gebündelt an den Kernel zurückgemeldet.
